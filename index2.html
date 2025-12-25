@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>糖尿病用藥臨床決策支援 App</title>
+    <!-- 引入 fhirclient.js 庫（最新版本） -->
+    <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background-color: #f4f6f9;
+            margin: 20px;
+            padding: 20px;
+            color: #333;
+        }
+        h1, h2, h3 {
+            color: #0056b3;
+        }
+        #patient-info, #a1c-info, #conditions-info, #recommendation {
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        pre {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .highlight {
+            font-weight: bold;
+            color: #d9534f;
+        }
+        .loading {
+            color: #777;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <h1>糖尿病用藥臨床決策支援工具</h1>
+    <p>基於 2025 ADA 及臺灣糖尿病學會指引，提供即時用藥推薦（僅供參考，請以醫師判斷為主）</p>
+
+    <h2>患者基本資料</h2>
+    <div id="patient-info">載入中...</div>
+
+    <h2>最新 HbA1c 值</h2>
+    <div id="a1c-info">載入中...</div>
+
+    <h2>相關診斷</h2>
+    <div id="conditions-info">載入中...</div>
+
+    <h2>用藥決策推薦</h2>
+    <div id="recommendation">載入中...</div>
+
+    <script>
+        FHIR.oauth2.ready()
+            .then(client => {
+                // 取得 Patient 資料
+                client.patient.read().then(patient => {
+                    const name = patient.name?.[0] ? 
+                        `${patient.name[0].family || ''} ${patient.name[0].given?.join(' ') || ''}` : '未知';
+                    const gender = patient.gender === 'male' ? '男性' : patient.gender === 'female' ? '女性' : '未知';
+                    const birthDate = patient.birthDate || '未知';
+                    const age = birthDate ? new Date().getFullYear() - new Date(birthDate).getFullYear() : '未知';
+                    document.getElementById('patient-info').innerHTML = `
+                        <strong>姓名：</strong>${name}<br>
+                        <strong>性別：</strong>${gender}<br>
+                        <strong>出生日期：</strong>${birthDate}（約 ${age} 歲）
+                        <pre>${JSON.stringify(patient, null, 2)}</pre>
+                    `;
+                }).catch(err => {
+                    document.getElementById('patient-info').innerHTML = '<span class="highlight">錯誤：無法取得患者資料</span>';
+                    console.error(err);
+                });
+
+                // 取得最新 HbA1c (LOINC: 4548-4)
+                client.request(`Observation?patient=${client.patient.id}&code=4548-4&_sort=-date&_count=1`)
+                    .then(bundle => {
+                        if (bundle.entry && bundle.entry.length > 0) {
+                            const obs = bundle.entry[0].resource;
+                            const a1cValue = obs.valueQuantity?.value || '無數值';
+                            const date = obs.effectiveDateTime || '未知日期';
+                            document.getElementById('a1c-info').innerHTML = `
+                                <strong>HbA1c：</strong><span class="highlight">${a1cValue}%</span>（測量日期：${date}）<br>
+                                <pre>${JSON.stringify(obs, null, 2)}</pre>
+                            `;
+                            return a1cValue;
+                        } else {
+                            document.getElementById('a1c-info').innerHTML = '無 HbA1c 資料';
+                            return null;
+                        }
+                    })
+                    .then(a1c => {
+                        // 取得 Condition 診斷
+                        return client.request(`Condition?patient=${client.patient.id}`).then(condBundle => {
+                            const conditions = condBundle.entry || [];
+                            let conditionText = '';
+                            let hasT2DM = false, hasT1DM = false, hasGestational = false;
+                            let hasCVD = false, hasCKD = false;
+
+                            conditions.forEach(entry => {
+                                const code = entry.resource.code?.coding?.[0];
+                                if (code) {
+                                    conditionText += `${code.display || code.code}<br>`;
+                                    if (code.code === '44054006') hasT2DM = true;           // Type 2 DM
+                                    if (code.code === '46635009') hasT1DM = true;           // Type 1 DM
+                                    if (code.code === '11687002') hasGestational = true;    // Gestational DM
+                                    if (code.code === '53741008') hasCVD = true;            // Coronary arteriosclerosis
+                                    if (code.code === '709044004') hasCKD = true;           // CKD due to T2DM
+                                }
+                            });
+
+                            if (conditions.length === 0) conditionText = '無相關診斷資料';
+
+                            document.getElementById('conditions-info').innerHTML = conditionText;
+
+                            // 產生推薦邏輯
+                            let recs = ['<ul>'];
+
+                            if (hasGestational) {
+                                recs.push('<li class="highlight">妊娠糖尿病：優先生活型態調整，若需藥物治療首選胰島素，避免口服藥物（metformin 需謹慎評估）。</li>');
+                            } else if (hasT1DM) {
+                                recs.push('<li class="highlight">1型糖尿病：以胰島素為基礎治療，優化劑量調整。高A1C時警報酮酸中毒風險，建議搭配CGM或AID系統。</li>');
+                            } else if (hasT2DM || conditions.length > 0) {
+                                if (a1c >= 9) {
+                                    recs.push('<li class="highlight">A1C ≥9%：控制極差，建議立即啟動組合療法（如 metformin + GLP-1 RA）或直接胰島素治療。</li>');
+                                } else if (a1c > 7.5) {
+                                    recs.push('<li>A1C >7.5%：建議 metformin 為首選，若已使用可加用 GLP-1 RA 或 SGLT2i 以加強控制。</li>');
+                                } else if (a1c > 7) {
+                                    recs.push('<li>A1C >7%：尚未達標，建議加強 metformin 或加用第二線藥物。</li>');
+                                } else {
+                                    recs.push('<li>A1C ≤7%：控制良好，持續監測並維持目前治療。</li>');
+                                }
+
+                                if (hasCVD) {
+                                    recs.push('<li class="highlight">合併心血管疾病：優先使用具心臟保護效益之 GLP-1 RA（如 semaglutide）或 SGLT2i（如 empagliflozin）。</li>');
+                                }
+                                if (hasCKD) {
+                                    recs.push('<li class="highlight">合併慢性腎臟病：優先 SGLT2i（如 dapagliflozin）提供腎保護，監測 eGFR 變化。</li>');
+                                }
+                                recs.push('<li>基礎建議：metformin 為無合併症之2型糖尿病首選，同時強調生活型態介入。</li>');
+                            } else {
+                                recs.push('<li>無明確糖尿病診斷資料，請確認患者病史。</li>');
+                            }
+
+                            recs.push('<li><strong>參考指引：</strong>2025 ADA Standards of Care & 臺灣糖尿病臨床照護指引</li>');
+                            recs.push('</ul>');
+                            recs.push('<p class="highlight">本工具僅供臨床決策參考，請以醫師專業判斷為準。</p>');
+
+                            document.getElementById('recommendation').innerHTML = recs.join('');
+                        });
+                    })
+                    .catch(err => {
+                        document.getElementById('recommendation').innerHTML = '<span class="highlight">錯誤：無法產生推薦</span>';
+                        console.error(err);
+                    });
+            })
+            .catch(err => {
+                document.body.innerHTML += '<p class="highlight">授權失敗或無法連線至 FHIR Server，請確認在 EHR 環境中啟動 App。</p>';
+                console.error(err);
+            });
+    </script>
+</body>
+</html>
