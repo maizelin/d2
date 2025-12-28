@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>糖尿病用藥決策支援系統</title>
+  <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: 'Microsoft JhengHei', Arial, sans-serif; background: #f0f4f8; margin: 0; padding: 20px; }
+    .container { max-width: 1100px; margin: auto; }
+    h1 { text-align: center; color: #2c3e50; }
+    .status-bar { text-align: center; background: #e8f6f3; padding: 8px; border-radius: 4px; color: #16a085; margin-bottom: 20px; display: none; }
+    .patient-selector { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-bottom: 40px; }
+    .patient-card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); cursor: pointer; transition: 0.3s; }
+    .patient-card:hover { transform: translateY(-5px); box-shadow: 0 10px 25px rgba(0,0,0,0.15); }
+    .patient-card h3 { margin: 0 0 10px 0; color: #3498db; }
+    .patient-card p { margin: 5px 0; color: #555; }
+    .content { display: none; background: white; border-radius: 12px; padding: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); position: relative; }
+    .back-btn {
+      position: absolute; top: 20px; left: 20px;
+      background: #3498db; color: white; border: none; padding: 8px 16px;
+      border-radius: 8px; cursor: pointer; transition: 0.3s;
+    }
+    .back-btn:hover { background: #2980b9; }
+    canvas { max-height: 350px; width: 100%; }
+    .indicators { display: flex; justify-content: space-around; flex-wrap: wrap; gap: 20px; margin: 30px 0; }
+    .indicator-box { text-align: center; min-width: 120px; }
+    .bar { height: 40px; border-radius: 8px; line-height: 40px; color: white; font-weight: bold; font-size: 1.2em; text-shadow: 1px 1px 2px rgba(0,0,0,0.3); margin-top: 5px; }
+    .green { background: #27ae60; }
+    .yellow { background: #f39c12; }
+    .red { background: #e74c3c; }
+    .recommendations { margin-top: 30px; }
+    .rec-item { background: #f8f9fa; padding: 15px; border-left: 5px solid #3498db; margin: 10px 0; border-radius: 6px; }
+    .rec-high { border-left-color: #e74c3c; background: #fdf2f2; }
+    .rec-good { border-left-color: #27ae60; background: #f0fff4; }
+    footer { text-align: center; margin-top: 50px; color: #95a5a6; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>糖尿病用藥決策支援系統</h1>
+    <p style="text-align:center; color:#7f8c8d;">基於 ADA 2025 指引 • 個人化用藥建議</p>
+    
+    <div id="smartStatus" class="status-bar"></div>
+
+    <h2 style="color:#2c3e50;" id="selectorTitle">請選擇測試個案</h2>
+    <div class="patient-selector" id="patientSelector"></div>
+
+    <div class="content" id="patientContent">
+      <button class="back-btn" id="backBtn" onclick="backToSelector()">← 返回列表</button>
+
+      <h2 id="patientName" style="margin-left:40px; margin-top: 0;"></h2>
+      <p id="patientInfo" style="margin-left:40px;"></p>
+
+      <h3 style="margin-left:40px;">HbA1c 趨勢圖 (24個月)</h3>
+      <canvas id="hba1cChart"></canvas>
+
+      <h3 style="margin-left:40px;">臨床關鍵指標</h3>
+      <div class="indicators" id="indicators"></div>
+
+      <h3 style="margin-left:40px;">CDS 建議 (ADA 2025)</h3>
+      <div class="recommendations" id="recommendations"></div>
+    </div>
+  </div>
+
+  <footer>測試資料來源：THAS FHIR Sandbox • 2025-12-28 • 僅供教育與展示用途</footer>
+
+  <script>
+    let myChart = null;
+
+    window.onload = function() {
+        // 驗證state以防CSRF
+        const urlParams = new URLSearchParams(window.location.search);
+        const returnedState = urlParams.get('state');
+        if (returnedState !== sessionStorage.getItem('oauthState')) {
+            alert('State mismatch: Potential CSRF attack!');
+            return;
+        }
+
+        FHIR.oauth2.ready()
+            .then(client => {
+                document.getElementById('smartStatus').style.display = 'block';
+                document.getElementById('smartStatus').innerHTML = `✅ 已連線至 SMART Context (Patient ID: ${client.patient.id || 'Unknown'})`;
+
+                if (client.patient.id) {
+                    loadPatientData(client);  // 動態載入
+                    document.getElementById('backBtn').style.display = 'none';  // EHR模式隱藏返回
+                } else {
+                    // Fallback: 顯示選擇器（使用docx中患者ID）
+                    renderSelector();
+                }
+            })
+            .catch(error => {
+                console.error("SMART連線失敗:", error);
+                document.getElementById('smartStatus').innerHTML = `❌ SMART連線失敗: ${error.message}. 進入單機模式。`;
+                renderSelector();  // Fallback到靜態選擇器
+            });
+    };
+
+    // 渲染選擇器（fallback，使用docx患者ID）
+    function renderSelector() {
+        const fallbackPatients = [  // 從docx提取
+            {id: "683785", name: "陳志明", gender: "男", age: 45,

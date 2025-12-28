@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>糖尿病用藥決策支援系統 - Launch</title>
+    <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+</head>
+<body>
+    <script>
+        // 生成高entropy state以防CSRF
+        const state = Math.random().toString(36).substring(2) + Date.now().toString(36);
+        sessionStorage.setItem('oauthState', state);  // 儲存state以供驗證
+
+        // 生成PKCE code_verifier與code_challenge
+        function base64URLEncode(str) {
+            return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        }
+        const verifier = base64URLEncode(crypto.getRandomValues(new Uint8Array(32)));
+        sessionStorage.setItem('code_verifier', verifier);
+        crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+            .then(hash => {
+                const challenge = base64URLEncode(String.fromCharCode(...new Uint8Array(hash)));
+                FHIR.oauth2.authorize({
+                    clientId: "diabetes-cdss-app",
+                    scope: "launch patient/*.read user/Observation.rs openid fhirUser",  // 擴充scope以支援Observation search/read
+                    redirectUri: "app.html",
+                    iss: "https://thas.mohw.gov.tw/v/r4/fhir",  // 指定THAS伺服器iss（standalone模式）
+                    state: state,  // 防CSRF
+                    codeChallenge: challenge,
+                    codeChallengeMethod: "S256"  // PKCE
+                });
+            });
+    </script>
+    <p>正在重新導向至授權頁面...</p>
+</body>
+</html>
